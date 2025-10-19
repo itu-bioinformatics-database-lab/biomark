@@ -11,6 +11,10 @@ const { spawn } = require('child_process');
 
 const app = express();
 
+app.get('/', (req, res) => {
+  res.send('Biomarker API server is running.');
+});
+
 app.use(cors({
     origin: 'http://localhost:3000',
     exposedHeaders: ['x-session-id'] // Allow client to read the session header
@@ -242,6 +246,55 @@ app.post('/upload', upload.single('file'), (req, res) => {
     });
 });
 
+// step2 - Merge files endpoint
+app.post('/merge-files', async (req, res) => {
+    const { chosenColumns } = req.body;
+
+    if (!chosenColumns || !Array.isArray(chosenColumns) || chosenColumns.length < 2) {
+        return res.status(400).json({ success: false, error: 'Provide at least two files.' });
+    }
+
+    const pythonCommand = process.platform === 'win32' ? 'python' : 'python3';
+    const scriptPath = path.join(__dirname, 'services', 'merge.py');
+
+    // Send chosenColumns as a single JSON argument
+    const pythonArgs = [
+        '-Xfrozen_modules=off',
+        scriptPath,
+        JSON.stringify(chosenColumns)
+    ];
+
+    console.log("Running Python command:", pythonCommand, pythonArgs.join(" "));
+
+    const python = spawn(pythonCommand, pythonArgs);
+    let stdout = '', stderr = '';
+
+    python.stdout.on('data', data => stdout += data.toString());
+    python.stderr.on('data', data => stderr += data.toString());
+
+    python.on('close', code => {
+        if (code === 0) {
+            try {
+                const parsed = JSON.parse(stdout.trim());
+                return res.json({
+                    success: true,
+                    mergedFilePath: parsed.mergedFilePath,
+                    metadataPath: parsed.metadataPath,
+                    columns: parsed.columns
+                });
+            } catch (err) {
+                console.error(err);
+                return res.status(500).json({ success: false, error: 'Failed to parse merged file info' });
+            }
+        } else {
+            console.error(stderr);
+            return res.status(500).json({ success: false, error: 'Merge failed', details: stderr });
+        }
+    });
+});
+
+
+
 // step3 - Get all columns
 app.post('/get_all_columns', (req, res) => {
     console.log("At get all columns endpoint.");
@@ -355,24 +408,37 @@ app.post('/analyze', (req, res) => {
         nFolds
     } = req.body;
 
-    // Derive uploadId from prefixed filename (UUID_originalName.ext)
-    const derivedUploadId = path.basename(filePath).split('_')[0];
+    // Normalize file path for cross-platform consistency
+    const normalizedFilePath = path.normalize(filePath);
 
-    // Ownership check
-    const uploadOwner = db.prepare('SELECT session_id FROM uploads WHERE id = ?').get(derivedUploadId);
-    if (!uploadOwner || uploadOwner.session_id !== req.sessionId) {
-        return res.status(403).json({ success: false, error: 'Access denied for this file' });
+    // Check if it's a merged file (system-generated)
+    const isMergedFile = normalizedFilePath.includes(path.join('results', 'merged_files'));
+
+    // Ownership check — only apply to user uploads
+    if (!isMergedFile) {
+        const derivedUploadId = path.basename(filePath).split('_')[0];
+        const uploadOwner = db.prepare('SELECT session_id FROM uploads WHERE id = ?').get(derivedUploadId);
+
+        if (!uploadOwner || uploadOwner.session_id !== req.sessionId) {
+            return res.status(403).json({ success: false, error: 'Access denied for this file' });
+        }
     }
 
     const analysisId = uuidv4();
+    let derivedUploadIdForInsert = null;
+
+    if (!isMergedFile) {
+        derivedUploadIdForInsert = path.basename(filePath).split('_')[0];
+    }
 
     // Record analysis start
     try {
         db.prepare('INSERT INTO analyses (id, upload_id, status) VALUES (?,?,?)')
-          .run(analysisId, derivedUploadId, 'running');
+        .run(analysisId, derivedUploadIdForInsert, 'running');
     } catch (err) {
         console.error('Failed to insert analysis record:', err);
     }
+
     
     const startTime = Date.now(); // Start time of the process
     console.log(filePath, IlnessColumnName, SampleColumnName, selectedClasses, differential, clustering, classification, nonFeatureColumns, isDiffAnalysis);

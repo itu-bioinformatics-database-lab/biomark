@@ -20,3 +20,23 @@ body {
 @import './step8_2-showParameters.css';
 @import './step8_3-showStatistics.css';
 @import './step9-generateAnalysisReport.css';
+
+/* layout for the pair of column selectors in Step 3 */
+.column-select-pair {
+  display: flex;
+  gap: 24px;
+  align-items: flex-start;
+}
+
+/* ensure blocks look good */
+.column-select-block {
+  min-width: 0; /* allow flex child to shrink properly */
+}
+
+/* responsive: stack vertically on narrow screens */
+@media (max-width: 900px) {
+  .column-select-pair {
+    flex-direction: column;
+    gap: 12px;
+  }
+}
